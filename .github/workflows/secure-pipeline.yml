@@ -1,0 +1,400 @@
+name: Secure CI/CD Pipeline
+
+on:
+  push:
+    branches: [ candidate-assessment]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ candidate-assessment]
+  schedule:
+    - cron: '0 2 * * *' # Pipeline scheduled to run daily
+
+env:
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  DOCKER_IMAGE_NAME: ${{ github.repository }}
+  SCAN_RESULTS_DIR: security-reports
+
+# Limit permissions to minimum required
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  # Initial validation and setup
+  validate:
+    name: Validate Code Quality
+    runs-on: ubuntu-latest
+    outputs:
+      should_scan: ${{ steps.diff-check.outputs.should_scan }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Check for relevant changes
+        id: diff-check
+        run: |
+          # For PRs, check if security-relevant files were modified
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            BASE_REF=${{ github.event.pull_request.base.ref }}
+            HEAD_REF=${{ github.event.pull_request.head.ref }}
+            
+            # Check for changes in security-sensitive files
+            CHANGED_FILES=$(git diff --name-only $BASE_REF...$HEAD_REF)
+            echo "Changed files: $CHANGED_FILES"
+            
+            SECURITY_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(js|jsx|ts|tsx|py|java|go|rb|php|yml|yaml|Dockerfile|package\.json|requirements\.txt)|^\.github/workflows/' || true)
+            
+            if [ -n "$SECURITY_FILES" ]; then
+              echo "should_scan=true" >> $GITHUB_OUTPUT
+            else
+              echo "should_scan=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "should_scan=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Verify commit signatures
+        if: github.event_name == 'push'
+        run: |
+          if ! git verify-commit ${{ github.sha }}; then
+            echo "❌ Commit signature verification failed"
+            exit 1
+          fi
+          echo "✅ Commit signatures verified"
+
+      - name: Validate package integrity
+        run: |
+          npm ci --ignore-scripts
+          npm audit --audit-level=moderate --json > npm-audit.json || true
+          
+          # Check for critical vulnerabilities
+          CRITICAL_COUNT=$(jq -r '.metadata.vulnerabilities.critical // 0' npm-audit.json)
+          if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo "❌ Critical vulnerabilities found in dependencies: $CRITICAL_COUNT"
+            exit 1
+          fi
+
+  # SAST with SonarQube
+  sonarqube-scan:
+    name: SonarQube SAST Analysis
+    runs-on: ubuntu-latest
+    needs: validate
+    if: needs.validate.outputs.should_scan == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ github.repository }}
+            -Dsonar.projectName=${{ github.repository }}
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+            -Dsonar.pullrequest.key=${{ github.event.pull_request.number }}
+            -Dsonar.pullrequest.branch=${{ github.event.pull_request.head.ref }}
+            -Dsonar.pullrequest.base=${{ github.event.pull_request.base.ref }}
+
+      - name: Check Quality Gate Status
+        id: quality-gate-check
+        run: |
+          # Wait for quality gate and check status
+          sleep 30
+          echo "Quality gate analysis completed"
+
+  # Container and Dependency Security with Trivy
+  trivy-scan:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+    needs: validate
+    if: needs.validate.outputs.should_scan == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create reports directory
+        run: mkdir -p $SCAN_RESULTS_DIR
+
+      - name: Run Trivy filesystem scan
+        uses: aquasec/trivy-action@master
+        id: trivy-fs
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: '$SCAN_RESULTS_DIR/trivy-fs-scan.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+          ignore-unfixed: false
+          vuln-type: 'os,library'
+
+      - name: Process Trivy filesystem results
+        id: process-trivy-fs
+        run: |
+          CRITICAL_COUNT=$(jq -r '.runs[0].results[] | select(.level == "error") | .ruleId' $SCAN_RESULTS_DIR/trivy-fs-scan.sarif | wc -l)
+          HIGH_COUNT=$(jq -r '.runs[0].results[] | select(.level == "warning") | .ruleId' $SCAN_RESULTS_DIR/trivy-fs-scan.sarif | wc -l)
+          
+          echo "TRIVY_FS_CRITICAL=$CRITICAL_COUNT" >> $GITHUB_ENV
+          echo "TRIVY_FS_HIGH=$HIGH_COUNT" >> $GITHUB_ENV
+          
+          echo "Trivy Filesystem Scan Results:"
+          echo "Critical: $CRITICAL_COUNT"
+          echo "High: $HIGH_COUNT"
+
+      - name: Run Trivy repository scan for secrets
+        uses: aquasec/trivy-action@master
+        id: trivy-repo
+        with:
+          scan-type: 'repo'
+          scan-ref: '.'
+          format: 'sarif'
+          output: '$SCAN_RESULTS_DIR/trivy-repo-scan.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          scanners: 'vuln,secret,config'
+
+      - name: Process Trivy repository results
+        id: process-trivy-repo
+        run: |
+          SECRETS_COUNT=$(jq -r '.runs[0].results | length' $SCAN_RESULTS_DIR/trivy-repo-scan.sarif)
+          echo "TRIVY_REPO_SECRETS=$SECRETS_COUNT" >> $GITHUB_ENV
+          echo "Secrets detected: $SECRETS_COUNT"
+
+      - name: Build Docker image for container scanning
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        run: docker build -t $DOCKER_IMAGE_NAME .
+
+      - name: Run Trivy container scan
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        uses: aquasec/trivy-action@master
+        id: trivy-container
+        with:
+          scan-type: 'image'
+          scan-ref: '$DOCKER_IMAGE_NAME'
+          format: 'sarif'
+          output: '$SCAN_RESULTS_DIR/trivy-container-scan.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+          ignore-unfixed: true
+
+      - name: Upload security reports
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: $SCAN_RESULTS_DIR/*.sarif
+
+  # Quality Gates and Security Decision Making
+  security-quality-gate:
+    name: Security Quality Gate
+    runs-on: ubuntu-latest
+    needs: [sonarqube-scan, trivy-scan]
+    outputs:
+      security_status: ${{ steps.quality-gate.outputs.security_status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Apply security quality gates
+        id: quality-gate
+        run: |
+          # Initialize results
+          FAIL_BUILD=false
+          WARNINGS=""
+          SECURITY_STATUS="pass"
+          
+          # Quality Gate 1: No critical vulnerabilities from Trivy (FAIL)
+          if [ "$TRIVY_FS_CRITICAL" -gt 0 ]; then
+            echo "❌ CRITICAL: $TRIVY_FS_CRITICAL critical vulnerabilities found"
+            FAIL_BUILD=true
+            SECURITY_STATUS="fail"
+            WARNINGS+="Critical vulnerabilities detected. "
+          fi
+          
+          # Quality Gate 2: No secrets in code (FAIL)
+          if [ "$TRIVY_REPO_SECRETS" -gt 0 ]; then
+            echo "❌ CRITICAL: $TRIVY_REPO_SECRETS secrets detected in code"
+            FAIL_BUILD=true
+            SECURITY_STATUS="fail"
+            WARNINGS+="Secrets found in codebase. "
+          fi
+          
+          # Quality Gate 3: High vulnerabilities (WARN for PR, FAIL for candidate-assessment)
+          if [ "$TRIVY_FS_HIGH" -gt 3 ]; then
+            if [ "${{ github.ref }}" == "refs/heads/candidate-assessment" ]; then
+              echo "❌ HIGH: Too many high severity vulnerabilities for candidate-assessment branch: $TRIVY_FS_HIGH"
+              FAIL_BUILD=true
+              SECURITY_STATUS="fail"
+            else
+              echo "⚠️  WARNING: $TRIVY_FS_HIGH high severity vulnerabilities found"
+              WARNINGS+="High severity vulnerabilities need review. "
+              if [ "$SECURITY_STATUS" == "pass" ]; then
+                SECURITY_STATUS="warn"
+              fi
+            fi
+          fi
+          
+          # Set outputs
+          echo "security_status=$SECURITY_STATUS" >> $GITHUB_OUTPUT
+          echo "FAIL_BUILD=$FAIL_BUILD" >> $GITHUB_ENV
+          echo "WARNINGS=$WARNINGS" >> $GITHUB_ENV
+          
+          if [ "$FAIL_BUILD" = true ]; then
+            echo "::error::Security quality gates failed: $WARNINGS"
+            exit 1
+          elif [ -n "$WARNINGS" ]; then
+            echo "::warning::Security warnings: $WARNINGS"
+          else
+            echo "✅ All security quality gates passed"
+          fi
+
+      - name: Generate security summary report
+        run: |
+          echo "# Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trivy FS Critical**: $TRIVY_FS_CRITICAL" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trivy FS High**: $TRIVY_FS_HIGH" >> $GITHUB_STEP_SUMMARY
+          echo "- **Secrets Found**: $TRIVY_REPO_SECRETS" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚨 Quality Gate Status" >> $GITHUB_STEP_SUMMARY
+          if [ "$FAIL_BUILD" = true ]; then
+            echo "❌ **BUILD FAILED** - Critical security issues detected" >> $GITHUB_STEP_SUMMARY
+            echo "**Issues**: $WARNINGS" >> $GITHUB_STEP_SUMMARY
+          elif [ -n "$WARNINGS" ]; then
+            echo "⚠️  **BUILD PASSED WITH WARNINGS**" >> $GITHUB_STEP_SUMMARY
+            echo "**Warnings**: $WARNINGS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **ALL CHECKS PASSED** - No security issues detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Build and Test (only if security passes)
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: security-quality-gate
+    if: needs.security-quality-gate.outputs.security_status != 'fail'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run tests with coverage
+        run: npm test -- --coverage --watchAll=false
+
+      - name: Upload test coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage/lcov.info
+
+      - name: Build application
+        run: npm run build
+
+  # Deployment (only for candidate-assessment branch and security pass)
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [security-quality-gate, build-and-test]
+    if: |
+      github.ref == 'refs/heads/candidate-assessment' && 
+      needs.security-quality-gate.outputs.security_status != 'fail' &&
+      needs.build-and-test.result == 'success'
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to production
+        run: |
+          echo "Deploying to production..."
+          # Add your deployment commands here
+          # Example: npm run deploy, docker push, etc.
+
+      - name: Notify deployment success
+        if: success()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Production deployment completed successfully with security checks passed!'
+            })
+
+  # Security Failure Handling
+  security-failure:
+    name: Security Failure Handling
+    runs-on: ubuntu-latest
+    needs: security-quality-gate
+    if: needs.security-quality-gate.outputs.security_status == 'fail'
+    steps:
+      - name: Notify security failure
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const message = `🚨 SECURITY CHECK FAILED\n\nSecurity quality gates failed. Please review the security scan results and address the critical issues before proceeding.`;
+            
+            if (context.payload.pull_request) {
+              github.rest.issues.createComment({
+                issue_number: context.payload.pull_request.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+              
+              // Add security label
+              github.rest.issues.addLabels({
+                issue_number: context.payload.pull_request.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['security', 'needs-review']
+              });
+            }
+            
+            // Create security issue for tracking
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Security Scan Failure - Action Required',
+              body: `Security scan failed for ${context.sha}\n\nPlease review the security report and address the issues.`,
+              labels: ['security', 'bug', 'critical']
+            });
+
+      - name: Block deployment
+        run: |
+          echo "🚫 Deployment blocked due to security issues"
+          exit 1
