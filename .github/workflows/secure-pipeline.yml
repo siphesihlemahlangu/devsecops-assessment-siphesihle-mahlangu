@@ -1,0 +1,114 @@
+name: Secure CI/CD Pipeline
+on:
+  push:
+    branches: [ candidate-assessment ]
+  pull_request:
+    branches: [ candidate-assessment ]
+  schedule:
+    - cron: '0 2 * * *' # Daily security scan at 02:00 UTC
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  build-test:
+    name: Build & Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test --if-present
+
+  sonar-sast:
+    name: Static Analysis (SonarQube)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SonarQube Scan
+        uses: sonarsource/sonarcloud-github-action@master
+        with:
+          args: >
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }}
+            -Dsonar.organization=${{ secrets.SONAR_ORG }}
+            -Dsonar.token=${{ secrets.SONAR_TOKEN }}
+
+  trivy-scan:
+    name: Trivy Security Scan
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Run Trivy FS (filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+
+      - name: Build Docker image
+        run: docker build -t secure-app:ci .
+
+      - name: Run Trivy Image Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'secure-app:ci'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+
+      - name: Upload Trivy reports
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: |
+            trivy-fs.sarif
+            trivy-image.sarif
+
+  quality-gate:
+    name: Quality & Security Gate
+    needs: [sonar-sast, trivy-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check SonarQube Quality Gate
+        run: |
+          if [ "${{ needs.sonar-sast.result }}" != "success" ]; then
+            echo "❌ SonarQube quality gate failed"
+            exit 1
+          fi
+
+      - name: Check Trivy results
+        run: |
+          if [ "${{ needs.trivy-scan.result }}" != "success" ]; then
+            echo "❌ Trivy scan found CRITICAL/HIGH issues"
+            exit 1
+          fi
+      - run: echo "✅ All security gates passed"
+
+  deploy:
+    name: Deploy to Production
+    needs: quality-gate
+    runs-on: ubuntu-latest
+    if: ${{ success() }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Deploy application
+        run: ./scripts/deploy.sh
