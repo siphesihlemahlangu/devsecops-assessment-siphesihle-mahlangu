@@ -1,0 +1,37 @@
+1. Brief documentation of security controls
+Security control can be defined as sufegaurds or mechanisms put inplace to protect information systems, data, people from security threats.
+They help reduce risk, enforce compliance, and ensure the confidentiality and integrity.
+The CI/CD pipeline makes use of SonarQube(for code quality) and Trivy (vulerability scanning) to ensure that te code is secure before the deployment
+SonarQube is a tool used to inspect source code for bugs, vulnerabilities and duplicates across multiple programming languages(supports over 30 languages).
+The tool has a community edition which is free and open source, execellent for learning and small teams.
+The tool integrates with CI/CD (GitHub, BitBucket, AzureDevOps)
+Trivy is a tool used to finds vulnerabilities, misconfigurations, and secrets in Docker images, Kubernetes manifests, Terraform.
+The tool is a open source and it is used to scan container images, file systems, and Infrastructure-as-Code (IaC).
+The tool covers both vulnerabilities and misconfigurations
+The tool is a perfect for pipelines because it is light weight (minimal dependencies and doesn't require big backend).
+2. Example of how quality gates work
+Quality gates can be defined as checkpoints that must be passed before the code can progress.
+example 1:
+Situation: A developer/engineer updates a dependency in package.json to use a new and updated version of a framework:
+Solution: Using Trivy
+Scans Dependencies: Trivy analyzes the package-lock.json and detects that express@4.18.1 has a known vulnerability
+Identifies Vulnerability: Finds CVE-2023-12345 - "Prototype Pollution vulnerability in express"
+Assesses Severity: Classifies it as HIGH severity (CVSS score: 7.5/10)
+Provides Details:
+    Vulnerability: Prototype pollution allows remote code execution
+    Affected versions: express@4.16.0 - 4.18.2
+    Fixed in: express@4.18.3
+    Recommendation: Upgrade to express@4.18.3
+Possible results: Dev/engineer upgrades to the recommended version
+example 2: 
+Situation: A dev writes a authentication code that has a security flaw (the code exposes sql query.)
+Solution: Using SonarQube
+Code Analysis: Scans the JavaScript code and identifies the SQL query construction
+Pattern Recognition: Detects string concatenation with user input in SQL query
+Vulnerability Identification: Flags SQL Injection vulnerability (SonarQube rule: sql-injection)
+Severity Assessment: Classifies as CRITICAL severity
+Provides Solution:
+Vulnerability: User input directly concatenated into SQL query
+Risk: Allows arbitrary SQL execution
+Fix: Use parameterized queries or ORM
+Example fix provided

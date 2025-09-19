@@ -1,0 +1,22 @@
+My security Design Decisions
+
+1. Base image selection and hardening Node.js Alpine
+  I chose the Node.js Alpine image over the Node-slim:
+   *because Node.js Alpine has a significantly reduced footprint Node.js Alpine image size 5mb vs Node-slim image 180mb
+   *because Node.js Alpine excludes unnecessary packages, Node-slim include unnecessary Debian packages
+   *Node.js Alpine has faster security scanning due to its smaller size.
+   *reduced memory footprint limits exploit potential.
+2. Dependency management
+    I chose the npm ci --only=production --ignore-scripts because:
+    * the combination prevents supply chain attacks from malicious post-install scripts while ensuring only essential packages are include. 
+3. Runtime security (user, permissions, capabilities)
+    I chose the non-root user because:
+        *running as a non-root (UiD 1001) implements the Principle of Least Privilege at the container level. This prevents the container breaout attacks from compromising the host system.
+        *there is a limit of damage from application-level vulnerabilities
+        *I didn't choose the 'Root with dropped capabilities' because it has excessive privileges
+Scanning integration
+    I chose Trivy because:
+       * The tool was selected over Snyk because Snyk is expensive at scale
+       * The tool was elected over Grype because Grype is less accurate
+       * because the tool has automated quality gates with actionable results
+       * because the tool provides unified scanning for multiple vulnerability types.

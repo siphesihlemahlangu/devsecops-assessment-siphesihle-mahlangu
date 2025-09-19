@@ -1,0 +1,15 @@
+2025-09-19 01:37:23,208 - INFO - Starting security scan of: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-flags-app-main\src\pages
+2025-09-19 01:37:23,324 - ERROR - Error scanning git history: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-flags-app-main\src\pages
+2025-09-19 01:37:23,324 - INFO - Scan completed successfully
+2025-09-19 01:39:51,650 - INFO - Starting security scan of: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:39:51,742 - ERROR - Error scanning git history: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:39:51,744 - INFO - Scan completed successfully
+2025-09-19 01:41:03,775 - INFO - Starting security scan of: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:41:03,806 - ERROR - Error scanning git history: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:41:03,808 - INFO - Scan completed successfully
+2025-09-19 01:41:41,237 - INFO - Starting security scan of: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:41:41,273 - ERROR - Error scanning git history: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:41:41,273 - INFO - Scan completed successfully
+2025-09-19 01:43:37,705 - INFO - Starting security scan of: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:43:37,748 - ERROR - Error scanning git history: C:\Users\f501392\devsecops-assessment-siphesihle-mahlangu\country-service-main\src\test
+2025-09-19 01:43:37,749 - INFO - Scan completed successfully
